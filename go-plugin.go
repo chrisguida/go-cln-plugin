@@ -1,15 +1,19 @@
 package main
 
 import (
-	"fmt"
+	"errors"
 	"log"
 	"os"
 
+	"github.com/chrisguida/go-cln-plugin/util"
 	"github.com/elementsproject/glightning/glightning"
 	"github.com/elementsproject/glightning/jrpc2"
 )
 
-type Balance struct{}
+type Balance struct {
+	// Required string `json:"required"`
+	Mode string `json:"optional,omitempty"` // Add 'omitempty' to mark optional
+}
 
 func (h *Balance) New() interface{} {
 	return &Balance{}
@@ -18,26 +22,61 @@ func (h *Balance) New() interface{} {
 func (h *Balance) Name() string {
 	return "balance"
 }
-
 func (h *Balance) Call() (jrpc2.Result, error) {
-	log.Printf("calling listfunds\n")
 	funds, err := lightning.ListFunds()
 	if err != nil {
 		log.Printf("error found: %s\n", err)
 		return nil, err
 	}
-	log.Printf("converting to json\n")
 
-	var totalAmountMsat int64
+	var result int64
+	switch h.Mode {
+	case "":
+		fallthrough // Treat empty mode as total balance
+	case "total":
+		result = calculateTotalBalance(funds)
+	case "chain":
+		result = calculateChainBalance(funds)
+	case "channels":
+		result = calculateChannelsBalance(funds)
+	case "inbound":
+		return nil, errors.New("not implemented")
+	case "outbound":
+		return nil, errors.New("not implemented")
+	default:
+		return nil, errors.New("invalid balance mode")
+	}
+	return util.FormatMsat(result), nil
+}
+
+func calculateTotalBalance(funds *glightning.FundsResult) int64 {
+	var totalBalance int64
+	totalBalance += calculateChainBalance(funds)
+	totalBalance += calculateChannelsBalance(funds)
+	return totalBalance
+}
+
+func calculateChainBalance(funds *glightning.FundsResult) int64 {
+	var chainBalance int64
 	for _, output := range funds.Outputs {
-		totalAmountMsat += int64(output.AmountMilliSatoshi)
+		chainBalance += int64(output.AmountMilliSatoshi)
 	}
+	return chainBalance
+}
 
+func calculateChannelsBalance(funds *glightning.FundsResult) int64 {
+	var channelsBalance int64
 	for _, channel := range funds.Channels {
-		totalAmountMsat += int64(channel.AmountMilliSatoshi)
+		channelsBalance += int64(channel.OurAmountMilliSatoshi)
 	}
+	return channelsBalance
+}
 
-	return fmt.Sprint(totalAmountMsat), nil
+func addCommas(s string) string {
+	if len(s) <= 3 {
+		return s
+	}
+	return addCommas(s[:len(s)-3]) + "," + s[len(s)-3:]
 }
 
 var lightning *glightning.Lightning
@@ -64,7 +103,7 @@ func onInit(plugin *glightning.Plugin, options map[string]glightning.Option, con
 }
 
 func registerMethods(p *glightning.Plugin) {
-	rpcBalance := glightning.NewRpcMethod(&Balance{}, "Say hello!")
+	rpcBalance := glightning.NewRpcMethod(&Balance{}, "Returns your node's total funds balance")
 	rpcBalance.LongDesc = `Returns your node's total funds balance`
 	rpcBalance.Category = "utility"
 	p.RegisterMethod(rpcBalance)
